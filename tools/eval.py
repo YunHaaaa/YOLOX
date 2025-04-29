@@ -22,6 +22,7 @@ from yolox.utils import (
     get_model_info,
     setup_logger
 )
+import time
 
 
 def make_parser():
@@ -101,7 +102,7 @@ def make_parser():
         dest="speed",
         default=False,
         action="store_true",
-        help="speed test only.",
+        help="speed test only (warm-up 제외 평균 FPS 포함).",
     )
     parser.add_argument(
         "opts",
@@ -189,12 +190,47 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
+    if args.speed:
+        logger.info("▶ Speed 테스트 모드 - warm-up 제외 평균 FPS 측정")
+        warmup_iters = 5
+        inference_times = []
+
+        dataloader = evaluator.dataloader
+        logger.info(f"총 {len(dataloader)}개 배치 중, 처음 {warmup_iters}개는 warm-up으로 제외")
+
+        for i, (imgs, _, info_imgs, ids) in enumerate(dataloader):
+            imgs = imgs.cuda()
+            torch.cuda.synchronize()
+            start = time.time()
+            with torch.no_grad():
+                outputs = model(imgs)
+                torch.cuda.synchronize()
+            end = time.time()
+
+            if i >= warmup_iters:
+                inference_times.append(end - start)
+
+        avg_inf_time = sum(inference_times) / len(inference_times)
+        avg_fps = 1.0 / avg_inf_time
+
+        logger.info(f"▶ Warm-up 제외 평균 Inference Time: {avg_inf_time:.4f} sec")
+        logger.info(f"▶ Warm-up 제외 평균 FPS: {avg_fps:.2f}")
+        return
+
     # start evaluate
+    start_time = time.time()
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size
     )
-    logger.info("\n" + summary)
+    end_time = time.time()
 
+    elapsed_time = end_time - start_time
+    num_imgs = len(evaluator.dataloader)
+    fps = num_imgs / elapsed_time
+
+    logger.info("\n" + summary)
+    logger.info(f"총 소요 시간: {elapsed_time:.2f}초")
+    logger.info(f"평균 FPS: {fps:.2f} (전체 측정 기준)")
 
 if __name__ == "__main__":
     configure_module()
